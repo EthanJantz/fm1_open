@@ -14,6 +14,8 @@ Requires Windows x64, PowerShell, `curl.exe` and `tar.exe`. Firmware builds also
 
 Set `FM1_SOURCE_URL` to the HTTPS URL of this build's source archive, including its changes, license notices and build/install scripts. Web and package builds stop if it is missing.
 
+For official M-VAVE releases, use the matching source archive under `https://open.m-vave.com/releases/`. Verify that the URL is downloadable before generating the online and offline workbenches, and provide a corresponding development kit whenever the source changes. Third-party builds may use their own source hosting.
+
 ~~~powershell
 .\build.bat --web
 $env:FM1_PI32_TOOLCHAIN = 'C:\JL\pi32'

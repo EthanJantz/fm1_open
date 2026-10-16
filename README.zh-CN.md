@@ -14,6 +14,8 @@
 
 将 `FM1_SOURCE_URL` 设置为本次构建对应源码包的 HTTPS 地址，包内须含本次修改、许可声明和编译／安装脚本；未配置时，网页构建和打包会停止。
 
+M-VAVE 官方发布统一使用 `https://open.m-vave.com/releases/` 下的对应源码包地址。发布前确认该地址可下载，再生成在线及离线工作台；修改源码后须同步提供对应开发包。第三方构建可使用自己的源码托管地址。
+
 ~~~powershell
 .\build.bat --web
 $env:FM1_PI32_TOOLCHAIN = 'C:\JL\pi32'
