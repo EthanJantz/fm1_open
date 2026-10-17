@@ -522,7 +522,7 @@ button{border-radius:7px;background:#223039;border-color:#3b4b54;color:#d6e3e6;f
       saveStatus('请选择保存位置；已有内容将被覆盖。');$('device-save-slot').focus();
     }catch(error){saveStatus(error.message);}finally{saveOpening=false;}
   }
-  function closeSave(){if(saveRunning)return;saveDialog.close();saveBytes=undefined;saveReturnFocus?.focus();}
+  function closeSave(){if(saveRunning)return;if(saveOpening)cancelConnection();saveDialog.close();saveBytes=undefined;saveReturnFocus?.focus();}
   $('device-save-cancel').onclick=closeSave;
   saveDialog.addEventListener('cancel',event=>{event.preventDefault();closeSave();});
   $('device-save-confirm').onclick=async()=>{
@@ -561,7 +561,8 @@ button{border-radius:7px;background:#223039;border-color:#3b4b54;color:#d6e3e6;f
       slots.push(option(slot,(slot+1)+' · '+String.fromCharCode(...name).trim()));
     }
     const working=await library.download(0);
-    if(working.length!==(info[3]|info[4]<<8))throw Error('设备文件长度无效');
+    if(working.length!==(library.tuningBytes||(info[3]|info[4]<<8)))throw Error('设备文件长度无效');
+    FM1Web.projectVersion(working);
     // Publish a complete snapshot only after every query succeeds. A partial
     // list must never enable load/save/import with an empty selection.
     $('project-slot').replaceChildren(...slots);
@@ -611,7 +612,7 @@ button{border-radius:7px;background:#223039;border-color:#3b4b54;color:#d6e3e6;f
   }));
   $('project-file').addEventListener('change',()=>perform(async()=>{
     projectBytes=undefined;const file=$('project-file').files[0];if(!file)return;
-    if(file.size>4096)throw Error('项目备份文件过大');projectBytes=FM1Web.readProjectFile(new Uint8Array(await file.arrayBuffer()));message('备份校验通过，可以恢复到工作区。');
+    if(file.size>4280)throw Error('项目备份文件过大');projectBytes=FM1Web.readProjectFile(new Uint8Array(await file.arrayBuffer()));message('备份校验通过，可以恢复到工作区。');
   }));
   $('project-import').addEventListener('click',()=>perform(async()=>{
     if(!projectBytes||!confirm(FM1I18n.t('用备份替换当前未保存的工作区？设备项目槽不会自动覆盖。')))return;

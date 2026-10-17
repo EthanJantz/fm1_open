@@ -1094,6 +1094,7 @@ static __attribute__((noinline)) void project_draw(void)
     if (cache->row_cache[1] == sig) return;
     cache->row_cache[1] = sig;
     const char *status = project_result == GROOVE_PROJECT_EMPTY     ? "NO VALID SAVE"
+                         : project_result == GROOVE_PROJECT_TUNING_SPACE ? "REDUCE SAMPLE BANK"
                          : project_result == GROOVE_PROJECT_MEMORY  ? "NOT ENOUGH MEMORY"
                          : project_result == GROOVE_PROJECT_INVALID ? "INVALID PROJECT"
                          : project_result == FM1_FLASH_BUSY         ? "FLASH BUSY - RETRY"

@@ -514,8 +514,13 @@
     return Uint8Array.from([240,67,channel,0,1,27,...voice,(-sum)&127,247]);
   }
   function projectVersion(payload) {
-    check(payload instanceof Uint8Array&&[4048,4064].includes(payload.length),'项目长度无效');
+    check(payload instanceof Uint8Array&&[4048,4064,4264].includes(payload.length),'项目长度无效');
     const version=payload.length===4048?3:4;
+    if(payload.length===4264){
+      const block=payload.subarray(4064),view=new DataView(block.buffer,block.byteOffset,block.byteLength);
+      check(view.getUint32(0,true)===0x54314d46&&view.getUint32(196,true)===crc32(block.subarray(0,196))&&
+        !block.subarray(4,196).includes(128),'项目调音数据无效');
+    }
     check(payload[3852]===version,'项目备份格式无效');return version;
   }
   function upgradeProject(payload) {
@@ -530,8 +535,15 @@
     file.set([70,77,49,80,version,0,0,0]);
     view.setUint32(8,payload.length,true);view.setUint32(12,crc32(payload),true);file.set(payload,16);return file;
   }
+  function tunedProject(payload) {
+    payload=upgradeProject(payload);
+    if(payload.length===4264)return payload;
+    const data=new Uint8Array(4264),view=new DataView(data.buffer);data.set(payload);
+    view.setUint32(4064,0x54314d46,true);view.setUint32(4260,crc32(data.subarray(4064,4260)),true);
+    return data;
+  }
   function readProjectFile(file) {
-    check(file instanceof Uint8Array&&[4064,4080].includes(file.length),'项目备份文件长度无效');
+    check(file instanceof Uint8Array&&[4064,4080,4280].includes(file.length),'项目备份文件长度无效');
     check(ascii(file.slice(0,4))==='FM1P'&&[3,4].includes(file[4])&&file[5]===0&&file[6]===0&&file[7]===0,'项目备份格式无效');
     const payload=file.slice(16),view=new DataView(file.buffer,file.byteOffset,file.byteLength);
     check(file[4]===projectVersion(payload)&&view.getUint32(8,true)===payload.length&&view.getUint32(12,true)===crc32(payload),'项目备份校验失败');
@@ -554,10 +566,28 @@
       await this.disconnect();signal?.throwIfAborted();const found=pairs(this.access);
       check(found.length===1,found.length?'请只连接一台 FM1':'未找到支持项目库的 FM1 USB MIDI');
       const {input,output}=found[0];
-      try {await portOperation(input,'open',signal);await portOperation(output,'open',signal);this.link=new Link(input,output,demoParse,signal);const info=await this.query(0);check(info.length===14&&info[1]===16&&((info[0]===3&&le(info,3,2)===4048)||(info[0]===4&&le(info,3,2)===4064)),'当前固件未支持这个项目库');this.projectBytes=le(info,3,2);return info;}
+      try {await portOperation(input,'open',signal);await portOperation(output,'open',signal);this.link=new Link(input,output,demoParse,signal);const info=await this.query(0);check(info.length===14&&info[1]===16&&((info[0]===3&&le(info,3,2)===4048)||(info[0]===4&&le(info,3,2)===4064)),'当前固件未支持这个项目库');this.projectBytes=le(info,3,2);await this.extensions();return info;}
       catch(e){if(this.link)await this.disconnect().catch(()=>{});else await closePorts(input,output).catch(()=>{});throw e;}
     }
-    async disconnect(){if(this.link)await this.link.close();this.link=null;this.projectBytes=0;}
+    async disconnect(){if(this.link)await this.link.close();this.link=null;this.projectBytes=0;this.tuningBytes=0;}
+    async extensions(){
+      this.tuningBytes=0;
+      try {
+        const info=await this.query(21);
+        check(info.length===7&&(info[0]&~1)===0&&le(info,1,2)===4264&&le(info,3,4)===462848,'设备文件长度无效');
+        if(info[0]&1)this.tuningBytes=4264;
+      } catch(error){if(error.deviceCode!==71)throw error;}
+    }
+    projectPayload(bytes){
+      projectVersion(bytes);
+      if(this.tuningBytes)return tunedProject(bytes);
+      if(bytes.length===4264){
+        check(bytes.subarray(4068,4260).every(value=>value===0),'请先更新设备固件，再写入含调音设置的项目');
+        bytes=bytes.slice(0,4064);
+      }
+      check(this.projectBytes!==4048||bytes.length===4048,'请先更新设备固件，再写入含 ARP 设置的项目');
+      return this.projectBytes===4064?upgradeProject(bytes):bytes;
+    }
     async query(command,payload=[],emptyOK=false) {
       check(this.link&&!this.link.lost,'请先连接项目库');check(!this.pending,'文件传输正在进行');
       if([5,8,10].includes(command))this.onProjectChange?.();
@@ -571,7 +601,7 @@
             const r=await link.read(Math.min(200,until-Date.now()));check(!link.lost,'USB 已断开，当前操作未完成');
             if(!r||r.command!==(command|64)||r.token!==token)continue;
             check(r.data.length>0,'设备回复不完整');const code=r.data[0];
-            check(code===0||(emptyOK&&code===1),code===1?'该项目槽为空':code===72?'内存不足，当前项目保持不变':code===71?'文件或参数无效，当前项目保持不变':'设备操作失败：'+code);
+            if(code!==0&&!(emptyOK&&code===1))throw Object.assign(Error(code===1?'该项目槽为空':code===73?'采样库占用了调音存储空间，请先缩小采样库再保存项目':code===72?'内存不足，当前项目保持不变':code===71?'文件或参数无效，当前项目保持不变':'设备操作失败：'+code),{deviceCode:code});
             return r.data.slice(1);
           }
         }
@@ -579,16 +609,16 @@
       } finally {this.pending=false;}
     }
     async download(kind,target=0) {
-      const head=await this.query(1,[kind,target]),size=le(head,0,2);check(head.length===2&&(kind?size===(kind===2?223:156):[4048,4064].includes(size)),'设备文件长度无效');
+      if(kind===0&&this.tuningBytes)kind=3;
+      const head=await this.query(1,[kind,target]),size=le(head,0,2);check(head.length===2&&(kind?size===(kind===3?4264:kind===2?223:156):[4048,4064].includes(size)),'设备文件长度无效');
       const bytes=new Uint8Array(size);
       try {for(let at=0;at<size;at+=64){const n=Math.min(64,size-at),part=await this.query(2,[at&255,at>>8,n]);check(part.length===n,'文件片段不完整');bytes.set(part,at);}return bytes;}
       finally {if(this.link&&!this.link.lost)await this.query(6).catch(()=>{});}
     }
     async saveProject(slot,bytes) {
       check(Number.isInteger(slot)&&slot>=0&&slot<16,'请选择设备项目槽');
-      if(bytes)await this.upload(0,0,bytes);
+      if(bytes){bytes=this.projectPayload(bytes);await this.upload(0,0,bytes);}
       const expected=await this.download(0);
-      if(bytes&&expected.length===4064)bytes=upgradeProject(bytes);
       check(!bytes||(bytes.length===expected.length&&bytes.every((value,i)=>value===expected[i])),
         '设备工作区与待保存项目不一致，尚未写入项目槽');
       await this.query(7,[slot]);
@@ -608,7 +638,7 @@
       return data;
     }
     async samplesWrite(data,progress=()=>{},signal) {
-      check(data instanceof Uint8Array&&data.length>=512&&data.length<=466944,'采样库长度无效');
+      check(data instanceof Uint8Array&&data.length>=512&&data.length<=462848,'采样库长度无效');
       // Validate before erasing the device; every caller uses the same bank format.
       globalThis.FM1Samples.read(data);
       const info=await this.query(11);globalThis.FM1Samples.status(info);
@@ -627,9 +657,8 @@
       if(kind===1)validateVoice(bytes);
       else if(kind===2)check(bytes.length===223,'文件长度无效');
       else {
-        projectVersion(bytes);
-        check(this.projectBytes!==4048||bytes.length===4048,'请先更新设备固件，再写入含 ARP 设置的项目');
-        if(this.projectBytes===4064)bytes=upgradeProject(bytes);
+        bytes=this.projectPayload(bytes);
+        if(bytes.length===4264)kind=3;
       }
       await this.query(3,[kind,target,bytes.length&255,bytes.length>>8]);
       try {
@@ -639,5 +668,5 @@
     }
   }
   globalThis.FM1Web={abortable,assetBytes,crc16,inspectPackage,prepare,pack7,frame,parse,capability,Link,pairs,Updater,
-    crc32,demoFrame,demoParse,validateVoice,readVoices,voiceFile,projectVersion,upgradeProject,projectFile,readProjectFile,timbreFile,readTimbreFile,Library};
+    crc32,demoFrame,demoParse,validateVoice,readVoices,voiceFile,projectVersion,upgradeProject,tunedProject,projectFile,readProjectFile,timbreFile,readTimbreFile,Library};
 })();

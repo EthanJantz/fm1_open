@@ -19,7 +19,7 @@ enum { FLASH_BYTES = GROOVE_FLASH_BYTES, MIDI_QUEUE = 64, STATE_BYTES = 225 };
 static struct fm1_controls controls;
 static uint16_t pixels[240 * 240];
 static uint8_t leds[41], flash[FLASH_BYTES], state[STATE_BYTES];
-static uint8_t file_buffer[GROOVE_PROJECT_BYTES];
+static uint8_t file_buffer[GROOVE_PROJECT_TUNED_BYTES];
 static uint32_t now_ms, frame_revision, frame_dirty, flash_revision;
 static uint64_t frames;
 static unsigned gate, midi_read, midi_write, midi_reset;
@@ -375,7 +375,14 @@ EXPORT("sim_factory_project") int sim_factory_project(unsigned index)
 {
     struct groove_project *p = groove_project_scratch();
     int r = groove_factory_build(index, p);
-    if (!r) memcpy(file_buffer, p, sizeof *p);
+    if (!r) {
+        memcpy(file_buffer, p, sizeof *p);
+        uint8_t *tail = file_buffer + sizeof *p;
+        memset(tail, 0, GROOVE_TUNING_BLOCK_BYTES);
+        memcpy(tail, "FM1T", 4);
+        uint32_t crc = ~groove_crc32(~0U, tail, GROOVE_TUNING_BLOCK_BYTES - 4);
+        memcpy(tail + GROOVE_TUNING_BLOCK_BYTES - 4, &crc, sizeof crc);
+    }
     return r;
 }
 EXPORT("sim_patch_export") int sim_patch_export(void)

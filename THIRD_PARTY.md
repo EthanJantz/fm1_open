@@ -13,11 +13,13 @@ Project-owned public APP sources: [GPLv3 with the FM1 SDK linking exception](LIC
 | Packager | [jl-misctools](https://github.com/kagaimiq/jl-misctools/tree/0a5b12db0ef38f3042acffbe2452730a37fd2405), MIT; format/codec adaptation with FM1 validation and layout. |
 | Native C runtime | `sdk/lib/libc.a`, Newlib-derived routines; native runtime notices below. |
 | Native compiler runtime | `sdk/lib/libcompiler_rt.a`; identified compiler-rt routines, legacy MIT / University of Illinois-NCSA notices below.  |
+| micro-ecc | Identified routines in `sdk/lib/libfm1_engine.a`; BSD-2-Clause notice below. |
 | JieLi SDK material | Identified AC79 SDK material retains its upstream terms; see SDK notices below. |
+| APP / open web engine tuning | Incorporates contributions by [Vikram Rojo (PR #2)](https://github.com/m-vave/fm1_open/pull/2), with FM1 integration changes (2026-10-17). Original file licenses and notices are retained. |
 | Configuration resource | `sdk/tools/pack/cfg_tool.bin`, identical to the file in the identified official JieLi Apache-2.0 SDK distribution; see below. |
 | Boot/update resources and recovery firmware | `sdk/tools/pack/uboot.boot`, `ota.bin`, `boot-config.bin`, and `sdk/firmware/FM-1_015.fwsc`, Apache-2.0; see the resource terms below. |
 
-FM1 modifications, FX, arrangements and synthesized demo samples: Copyright (c) 2026 珠海笙科智能科技有限公司 (M-VAVE). Product names identify compatible formats; no upstream endorsement is implied.
+Company-authored FM1 modifications, FX, arrangements and synthesized demo samples: Copyright (c) 2026 珠海笙科智能科技有限公司 (M-VAVE). Product names identify compatible formats; no upstream endorsement is implied.
 
 ## Binary SDK
 
@@ -83,6 +85,39 @@ FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR
 COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER
 IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
 CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+```
+
+</details>
+
+### micro-ecc
+
+Identified micro-ecc routines retain the BSD-2-Clause notice from [micro-ecc](https://github.com/kmackay/micro-ecc/blob/541b3a78026420a3e369c4c9281c396b5e531113/LICENSE.txt). This identifies the notice source, not the vendor archive's exact revision.
+
+<details>
+<summary>BSD-2-Clause license</summary>
+
+```text
+Copyright (c) 2014, Kenneth MacKay
+All rights reserved.
+
+Redistribution and use in source and binary forms, with or without modification,
+are permitted provided that the following conditions are met:
+ * Redistributions of source code must retain the above copyright notice, this
+   list of conditions and the following disclaimer.
+ * Redistributions in binary form must reproduce the above copyright notice,
+   this list of conditions and the following disclaimer in the documentation
+   and/or other materials provided with the distribution.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR
+ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+(INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON
+ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ```
 
 </details>

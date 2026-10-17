@@ -78,7 +78,8 @@ function Test-Firmware {
         'audio_app_usb_microphone_enable','audio_app_usb_speaker_enable',
         'connectivity_audio_usb_microphone_enable','connectivity_audio_usb_speaker_enable')
     $required += @('audio_app_bluetooth_open','sbc_decoder','sbc_hwaccel','avdtp_packet_handler','bt_get_local_name','bt_get_mac_addr',
-        'fm1_bluetooth_configure','fm1_bluetooth_get_status')
+        'fm1_bluetooth_configure','fm1_bluetooth_get_status',
+        'groove_tuning_capture','groove_tuning_apply','groove_project_apply_edit')
     foreach ($name in $required) { if (!$info.ContainsKey($name)) { throw "Required runtime symbol absent: $name" } }
     # Incoming connections also work with inert client stubs. Require the
     # fixed SDK's real discovery paths for A2DP reconnect and BLE HOST.
@@ -284,7 +285,7 @@ if ($Package) {
     }
 }
 $versionMatch = [regex]::Match([IO.File]::ReadAllText((Join-Path $root 'app/version.h')), '(?m)^#define FM1_RELEASE_VERSION "(V(?:0[1-9]|[1-9][0-9]{1,2}))"\s*$')
-if (!$versionMatch.Success) { throw 'Set FM1_RELEASE_VERSION in app/version.h (for example V12).' }
+if (!$versionMatch.Success) { throw 'Set FM1_RELEASE_VERSION in app/version.h.' }
 $releaseVersion = $versionMatch.Groups[1].Value
 $productMatch = [regex]::Match([IO.File]::ReadAllText((Join-Path $root 'app/version.h')), '(?m)^#define FM1_UPDATE_PRODUCT "(FM-1_8[0-9]{6})"\s*$')
 if (!$productMatch.Success) { throw 'Set a compatible FM1_UPDATE_PRODUCT in app/version.h.' }
@@ -311,7 +312,7 @@ if ($manifest.external_toolchain) {
     }
 }
 $synth = Get-Content -LiteralPath (Join-Path $sdk 'synth.json') -Encoding UTF8 -Raw | ConvertFrom-Json
-if ($synth.schema -ne 4 -or $synth.api -ne 6 -or $synth.kernel_abi -ne 3 -or $synth.block_frames -ne 128 -or $synth.sample_rate -ne 44100 -or
+if ($synth.schema -ne 4 -or $synth.api -ne 7 -or $synth.kernel_abi -ne 3 -or $synth.block_frames -ne 128 -or $synth.sample_rate -ne 44100 -or
     $synth.sdk_block_sha256 -cne (Hash (Join-Path $sdk 'include/fm1_block.h')) -or
     $synth.native_sha256 -cne (Hash (Join-Path $sdk 'lib/libfm1_engine.a'))) {
     throw 'Native DSP kernels and SDK audio contracts do not match. Install a matching SDK package.'
@@ -345,7 +346,7 @@ $include = @('sdk/include','sdk/include/libc','app/synth','sdk/config','app','ap
 $sources = @(Get-ChildItem -LiteralPath (Join-Path $root 'app') -Recurse -File |
     Where-Object { $_.Extension -in @('.c','.S') -and !$_.FullName.StartsWith(([IO.Path]::GetFullPath((Join-Path $root 'app/synth'))+'\'),[StringComparison]::OrdinalIgnoreCase) } | Sort-Object FullName | ForEach-Object { $_.FullName.Substring($root.Length+1).Replace('\','/') })
 $extra = @('groove_sequence_render','groove_sequence_clock','groove_sequence_position','groove_sequence_transport','fm1_sea_decode_groups','fm1_codec_sea_mono_s16_run') + @($synth.sram_required) + @(
-    'synth_dx7_render','synth_dx7_midi','fm1_dx7_panic','fm_exp2_fixed','bass303_bank_render','bass303_bank_note','bass303_bank_set','drum808_kit_render','drum808_kit_trigger','psg_render','psg_note','psg_midi','psg_panic','psg_set','psg_get','pluck_render','pluck_note','pluck_midi','pluck_panic','pluck_set','pluck_get','fm1_mix128','fm1_mix_mono_stereo128','fm1_bus_output128','fm1_master_mix128','fm1_master_gain','fm1_declick128','fm1_render_begin','fm1_render_end','synth_dx7_active','bass303_bank_active','drum808_kit_active','psg_active','pluck_active','sampledrum_active','synth_dx7_limit','psg_limit','pluck_limit','sampledrum_limit','bass303_advance_idle','fm1_send128','fm1_fx_render','fm1_fx_clear','fm1_fx_active','sampledrum_render','sampledrum_trigger','sampledrum_panic','psg_active_chips')
+    'synth_dx7_render','synth_dx7_midi','synth_dx7_key','fm1_dx7_panic','fm_exp2_fixed','bass303_bank_render','bass303_bank_key','bass303_bank_set','drum808_kit_render','drum808_kit_trigger','psg_render','psg_key','psg_midi','psg_panic','psg_set','psg_get','pluck_render','pluck_key','pluck_midi','pluck_panic','pluck_set','pluck_get','fm1_mix128','fm1_mix_mono_stereo128','fm1_bus_output128','fm1_master_mix128','fm1_master_gain','fm1_declick128','fm1_render_begin','fm1_render_end','synth_dx7_active','bass303_bank_active','drum808_kit_active','psg_active','pluck_active','sampledrum_active','synth_dx7_limit','psg_limit','pluck_limit','sampledrum_limit','bass303_advance_idle','fm1_send128','fm1_fx_render','fm1_fx_clear','fm1_fx_active','sampledrum_render','sampledrum_trigger','sampledrum_panic','psg_active_chips')
 [IO.Directory]::CreateDirectory((Join-Path $build 'obj')) | Out-Null
 [IO.Directory]::CreateDirectory((Join-Path $build 'generated')) | Out-Null
 # All application units are rebuilt. Remove objects for deleted/renamed sources.

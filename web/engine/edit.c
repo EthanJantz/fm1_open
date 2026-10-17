@@ -1,8 +1,12 @@
 /* SPDX-License-Identifier: GPL-3.0-only WITH GPL-3.0-linking-exception */
+/* Modified 2026-10-17: include tuning in dirty/undo state; checkpoint fallible
+ * edits only after the engine has allocated the required voices. */
 #include "internal.h"
+#include "tuning_hook.h"
 #include <string.h>
 
 static struct groove_project undo;
+static struct groove_tuning undo_tuning[GROOVE_TRACKS];
 static unsigned undo_ready, undo_busy, undo_tag, undo_time, record_track, edit_error;
 static unsigned recording;
 static unsigned dirty, clean_hash, check_time, hash_pending;
@@ -10,10 +14,16 @@ static uint32_t edit_revision;
 static uint8_t cursor[8], take_step[8];
 static uint32_t held[8][4], take[8][4];
 static unsigned observed;
+
+static void capture_tuning(struct groove_tuning t[GROOVE_TRACKS])
+{
+    if (!groove_tuning_capture || groove_tuning_capture(t))
+        memset(t, 0, sizeof(struct groove_tuning) * GROOVE_TRACKS);
+}
 enum { RECORD_QUEUE = 128 };
 static struct {
     unsigned read, write, overflow, changed, activity[GROOVE_TRACKS];
-    struct { uint8_t track, note, velocity, step; } event[RECORD_QUEUE];
+    struct { uint8_t track, note, velocity, step, alt; } event[RECORD_QUEUE];
 } queue;
 static struct {
     struct groove_step step[64];
@@ -26,6 +36,11 @@ static unsigned project_hash(const struct groove_project *p)
     const uint8_t *b = (const uint8_t *)p;
     unsigned h = 2166136261U;
     for (unsigned i = 0; i < sizeof *p; ++i)
+        h = (h ^ b[i]) * 16777619U;
+    struct groove_tuning tuning[GROOVE_TRACKS];
+    capture_tuning(tuning);
+    b = (const uint8_t *)tuning;
+    for (unsigned i = 0; i < sizeof tuning; ++i)
         h = (h ^ b[i]) * 16777619U;
     return h;
 }
@@ -72,6 +87,7 @@ void groove_edit_checkpoint(unsigned operation)
     if (!undo_ready || operation != undo_tag || now - undo_time > 400U) {
         if (groove_project_capture(&undo))
             return;
+        capture_tuning(undo_tuning);
         undo_ready = 1;
         undo_tag = operation;
     }
@@ -85,10 +101,17 @@ int groove_edit_undo(void)
     int r = groove_project_capture(p);
     if (r)
         return r;
+    struct groove_tuning current_tuning[GROOVE_TRACKS];
+    capture_tuning(current_tuning);
     undo_busy = 1;
     groove_sequence_keep_transport(0);
     r = groove_project_apply(&undo);
     if (!r) {
+        /* Both snapshots came from the validated live state. Applying tables
+         * cannot fail, and happens only after project allocation succeeds. */
+        if (groove_tuning_apply)
+            groove_tuning_apply(undo_tuning);
+        memcpy(undo_tuning, current_tuning, sizeof undo_tuning);
         undo = *p;
         groove_sequence_keep_transport(1);
         dirty = 1;
@@ -179,6 +202,7 @@ FM1_DSP_CODE void groove_record_midi(const uint8_t *m, size_t n)
     queue.event[w].note = m[1];
     queue.event[w].velocity = type == 0x90 ? m[2] : 0;
     queue.event[w].step = (uint8_t)position;
+    queue.event[w].alt = (uint8_t)groove_alt_held(track);
     queue.write = next;
 }
 unsigned groove_midi_activity(unsigned track)
@@ -205,7 +229,7 @@ void groove_edit_poll(void)
          ++budget) {
         unsigned r = queue.read;
         unsigned t = queue.event[r].track, note = queue.event[r].note,
-                 velocity = queue.event[r].velocity, step = queue.event[r].step;
+                 velocity = queue.event[r].velocity, step = queue.event[r].step, alt = queue.event[r].alt;
         queue.read = (r + 1U) & (RECORD_QUEUE - 1U);
         if (!recording)
             continue;
@@ -244,6 +268,8 @@ void groove_edit_poll(void)
         }
         if (velocity && (count > 8 || groove_sequence_chord(t, step, notes, count, velocity)))
             edit_error = 2;
+        else if (velocity)
+            groove_sequence_alt(t, step, alt);
         if (stopped && was_held && !active && !velocity) {
             cursor[t] = (uint8_t)((cursor[t] + 1U) % groove_sequence_length(t));
             take_step[t] = 255;
@@ -365,10 +391,10 @@ int groove_edit_paste(unsigned track, unsigned step, unsigned scope)
         }
     if (!groove_project_valid(p))
         return -1;
-    groove_edit_checkpoint(0x80000U + track);
     if (scope < 2) {
         /* A step/page paste edits the pattern only. Preserve live voices,
          * arpeggiators and the transport instead of reloading every engine. */
+        groove_edit_checkpoint(0x80000U + track);
         fm1_web_pause();
         groove_sequence_replace(track, first, p->step[track] + first, count);
         groove_sequence_options_set(&p->sequence);
@@ -376,7 +402,7 @@ int groove_edit_paste(unsigned track, unsigned step, unsigned scope)
         return 0;
     }
     groove_sequence_keep_transport(0);
-    r = groove_project_apply(p);
+    r = groove_project_apply_edit(p, 0x80000U + track);
     if (!r) {
         groove_sequence_keep_transport(1);
         groove_project_touch();
@@ -481,6 +507,5 @@ int groove_timbre_import(unsigned track, const uint8_t *data, unsigned bytes)
             p->sequence.lock[i].track = 255;
     if (!groove_project_valid(p))
         return -1;
-    groove_edit_checkpoint(0xb0000U + track);
     return groove_timbre_apply(track, p);
 }

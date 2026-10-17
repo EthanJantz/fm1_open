@@ -1,8 +1,8 @@
 /* SPDX-License-Identifier: GPL-3.0-only WITH GPL-3.0-linking-exception */
 (() => {
   'use strict';
-  const SLOTS=8,DISK_SLOTS=16,CAPACITY=466944,HEADER=512,RATE=32000,CHUNK_FRAMES=320,CHUNK_BYTES=228,MAX_FILE=32*1024*1024;
-  const MAX_FRAMES=Math.floor((CAPACITY-HEADER)/CHUNK_BYTES)*CHUNK_FRAMES;
+  const SLOTS=8,DISK_SLOTS=16,CAPACITY=462848,REGION=466944,HEADER=512,RATE=32000,CHUNK_FRAMES=320,CHUNK_BYTES=228,MAX_FILE=32*1024*1024;
+  const MAX_FRAMES=Math.floor((REGION-HEADER)/CHUNK_BYTES)*CHUNK_FRAMES;
   const check=(ok,message)=>{if(!ok)throw Error(message);};
   const crcZero=new Uint8Array(8);
   const crc=data=>{
@@ -11,7 +11,7 @@
     return FM1Web.crc32(data.subarray(20),value);
   };
   function read(data) {
-    check(data instanceof Uint8Array&&data.length>=HEADER&&data.length<=CAPACITY,'采样库长度无效');
+    check(data instanceof Uint8Array&&data.length>=HEADER&&data.length<=REGION,'采样库长度无效');
     const v=new DataView(data.buffer,data.byteOffset,data.byteLength);
     check(v.getUint32(0,true)===0x53314d46&&v.getUint32(4,true)===1&&v.getUint32(8,true)===data.length&&
       v.getUint32(16,true)===0&&v.getUint32(20,true)===RATE&&v.getUint32(24,true)===0&&v.getUint32(28,true)===0,'采样库格式无效');
@@ -30,9 +30,9 @@
     check(entries.slice(SLOTS).every(s=>!s.frames&&!s.name),'采样库格式无效');
     return entries.slice(0,SLOTS);
   }
-  function pack(entries) {
+  function encodeBank(entries,capacity) {
     check(entries.length===SLOTS,'采样库必须包含 8 个槽位');
-    const size=HEADER+entries.reduce((n,s)=>n+s.data.length,0);check(size<=CAPACITY,'采样空间不足，请缩短音频或清空其他槽位');
+    const size=HEADER+entries.reduce((n,s)=>n+s.data.length,0);check(size<=capacity,'采样空间不足，请缩短音频或清空其他槽位');
     const data=new Uint8Array(size),v=new DataView(data.buffer);v.setUint32(0,0x53314d46,true);v.setUint32(4,1,true);
     v.setUint32(8,size,true);v.setUint32(20,RATE,true);let offset=HEADER;
     entries.forEach((s,i)=>{const at=32+i*28;v.setUint32(at,offset,true);v.setUint32(at+4,s.frames,true);v.setUint32(at+8,s.data.length,true);
@@ -40,10 +40,11 @@
     for(let i=SLOTS;i<DISK_SLOTS;i++)v.setUint32(32+i*28,offset,true);
     v.setUint32(12,crc(data),true);read(data);return data;
   }
+  function pack(entries){return encodeBank(entries,CAPACITY);}
   function status(data){
     check(data instanceof Uint8Array&&data.length===9&&data[0]<=4,'设备采样状态回复无效，未写入采样库');
     const view=new DataView(data.buffer,data.byteOffset,data.byteLength),size=view.getUint32(1,true);
-    check(view.getUint32(5,true)===CAPACITY&&(data[0]===2?size>=HEADER&&size<=CAPACITY:size===0),'设备采样区信息不匹配，未写入采样库');
+    check(view.getUint32(5,true)===REGION&&(data[0]===2?size>=HEADER&&size<=REGION:size===0),'设备采样区信息不匹配，未写入采样库');
     return data[0];
   }
   async function ensure(workbench,factory,report=()=>{},progress=()=>{}){
@@ -106,8 +107,8 @@
   function refresh(){
     const select=$('sample-slot'),old=select.value;select.replaceChildren();
     entries.forEach((s,i)=>{const o=document.createElement('option');o.value=i;FM1I18n.text(o,(i+1)+' · '+(s.name||'空槽')+' · '+(s.frames/RATE).toFixed(2)+' 秒');select.append(o);});
-    select.value=old||'0';bank=pack(entries);
-    FM1I18n.text($('sample-space'),'已用 '+((bank.length-HEADER)/1024).toFixed(1)+' / '+((CAPACITY-HEADER)/1024).toFixed(1)+' KiB；余 '+(Math.floor((CAPACITY-bank.length)/CHUNK_BYTES)*CHUNK_FRAMES/RATE).toFixed(2)+' 秒（按 SEA5 估算）。');
+    select.value=old||'0';bank=encodeBank(entries,REGION);
+    FM1I18n.text($('sample-space'),'已用 '+((bank.length-HEADER)/1024).toFixed(1)+' / '+((CAPACITY-HEADER)/1024).toFixed(1)+' KiB；余 '+(Math.max(0,Math.floor((CAPACITY-bank.length)/CHUNK_BYTES))*CHUNK_FRAMES/RATE).toFixed(2)+' 秒（按 SEA5 估算）。');
     limits();
   }
   function limits(){if(entries)FM1I18n.text($('sample-limit'),'当前槽最多可放 '+(availableFrames(entries,Number($('sample-slot').value))/RATE).toFixed(2)+' 秒；写入会自动导入当前选段。');}
@@ -186,7 +187,7 @@
   });
   $('sample-sim').onclick=()=>action(async()=>{if(pendingAudio)await replaceSelected();await FM1SamplePreview(bank);say('已送入仿真；请选择采样器轨道演奏。');});
   $('sample-export').onclick=()=>action(async()=>{if(pendingAudio)await replaceSelected();save(bank,'FM1-samples.fm1s');});
-  $('sample-bank-file').onchange=()=>action(async()=>{const f=$('sample-bank-file').files[0];$('sample-bank-file').value='';if(!f)return;check(f.size<=CAPACITY,'采样库过大');entries=read(new Uint8Array(await f.arrayBuffer()));decoded=undefined;pendingAudio=false;refresh();say('采样库文件已载入网页，尚未写入设备。');});
+  $('sample-bank-file').onchange=()=>action(async()=>{const f=$('sample-bank-file').files[0];$('sample-bank-file').value='';if(!f)return;check(f.size<=REGION,'采样库过大');entries=read(new Uint8Array(await f.arrayBuffer()));decoded=undefined;pendingAudio=false;refresh();say('采样库文件已载入网页，尚未写入设备。');});
   $('sample-cancel').onclick=()=>{cancel?.abort();playing?.stop();playing=undefined;enable();};
   globalThis.FM1EnsureSamples=(workbench=FM1Workbench)=>ensure(workbench,factory,say,progress);
   action(async()=>{entries=read(await factory());refresh();say('已载入网页内置采样库。编辑前可先读取设备库，保留已有自定义采样。');});

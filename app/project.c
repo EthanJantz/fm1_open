@@ -1,6 +1,12 @@
 /* SPDX-License-Identifier: GPL-3.0-only WITH GPL-3.0-linking-exception */
+/* Modified 2026-10-17: bind tuning to project contents, not device settings;
+ * preserve valid version-1 entries before rewriting their project records;
+ * defer edit checkpoints until allocation succeeds; reject tuned saves that
+ * overlap a legacy sample bank before changing Flash. */
 #include "instrument.h"
+#include "tuning_hook.h"
 #include <stddef.h>
+#include <stdlib.h>
 #include <string.h>
 
 /* One sector per project, plus one shared staging sector. Device settings fit
@@ -28,6 +34,17 @@ static unsigned restore_pending, role_pending, settings_dirty;
 static uint32_t settings_changed;
 static uint32_t project_revision;
 static int settings_result;
+static int recover_staging(void);
+/* Older SDKs retain their checkpoint/apply path; current engines defer the
+ * checkpoint until every required voice allocation has succeeded. */
+extern int groove_project_apply_edit(const struct groove_project *, unsigned) __attribute__((weak));
+static int apply_edit(const struct groove_project *p, unsigned operation)
+{
+    if (groove_project_apply_edit)
+        return groove_project_apply_edit(p, operation);
+    groove_edit_checkpoint(operation);
+    return groove_project_apply(p);
+}
 struct groove_project *groove_project_scratch(void) { return &record.project; }
 
 uint32_t groove_crc32(uint32_t crc, const void *data, unsigned bytes)
@@ -121,6 +138,270 @@ static int read_project(unsigned sector)
     int r = read_sector(sector);
     return !r && record.header.magic != PROJECT_MAGIC ? GROOVE_PROJECT_EMPTY : r;
 }
+/* Tuning sector (last 4 KiB of Flash, GROOVE_TUNING_OFFSET): header, then one
+ * entry per project slot. Version 2 binds tables to slot + project contents,
+ * excluding device settings and the record generation they also change.
+ * Replacements commit in the shared staging sector before erasing this one. */
+enum { TUNING_MAGIC = 0x54314d46U, TUNING_VERSION = 2, SAMPLE_BANK_MAGIC = 0x53314d46U };
+struct tuning_entry { uint32_t key; struct groove_tuning t[GROOVE_TRACKS]; uint32_t crc; };
+struct tuning_sector { uint32_t magic, version; struct tuning_entry entry[GROOVE_PROJECT_SLOTS]; };
+struct tuning_block { uint32_t magic; struct groove_tuning t[GROOVE_TRACKS]; uint32_t crc; };
+_Static_assert(sizeof(struct groove_tuning) == 24, "tuning table layout");
+_Static_assert(sizeof(struct tuning_entry) == 200, "tuning entry layout");
+_Static_assert(sizeof(struct tuning_block) == GROOVE_TUNING_BLOCK_BYTES, "tuning block layout");
+_Static_assert(sizeof(struct tuning_sector) <= FM1_FLASH_SECTOR_BYTES, "one tuning sector");
+enum { TUNING_JOURNAL_MAGIC = 0x4a544d46U,
+       TUNING_JOURNAL_ADDRESS = STAGING_SECTOR * FM1_FLASH_SECTOR_BYTES };
+struct tuning_journal { uint32_t magic, crc, commit; };
+_Static_assert(sizeof(struct tuning_journal) + sizeof(struct tuning_sector) <= FM1_FLASH_SECTOR_BYTES,
+               "tuning journal fits shared staging");
+static int flash_checksum(uint32_t address, unsigned bytes, uint32_t *result)
+{
+    uint8_t buffer[64];
+    uint32_t crc = ~0U;
+    while (bytes) {
+        unsigned n = bytes < sizeof buffer ? bytes : sizeof buffer;
+        int r = fm1_flash_read(address, buffer, n);
+        if (r) return r;
+        crc = groove_crc32(crc, buffer, n);
+        bytes -= n; address += n;
+    }
+    *result = ~crc;
+    return 0;
+}
+/* A committed tuning journal is authoritative until its destination verifies. */
+static int tuning_location(uint32_t *address)
+{
+    *address = GROOVE_TUNING_OFFSET;
+    struct tuning_journal header;
+    int r = fm1_flash_read(TUNING_JOURNAL_ADDRESS, &header, sizeof header);
+    if (r || header.magic != TUNING_JOURNAL_MAGIC || header.commit) return r;
+    uint32_t crc, body = TUNING_JOURNAL_ADDRESS + sizeof header;
+    r = flash_checksum(body, sizeof(struct tuning_sector), &crc);
+    if (!r && crc == header.crc) *address = body;
+    return r;
+}
+static int tuning_recover(void)
+{
+    uint32_t address;
+    int r = tuning_location(&address);
+    if (r || address == GROOVE_TUNING_OFFSET) return r;
+    struct tuning_sector *data = malloc(sizeof *data);
+    if (!data) return GROOVE_PROJECT_MEMORY;
+    r = fm1_flash_read(address, data, sizeof *data);
+    uint32_t expected = r ? 0 : ~groove_crc32(~0U, data, sizeof *data), actual;
+    if (!r) r = fm1_flash_erase(GROOVE_TUNING_OFFSET);
+    if (!r) r = fm1_flash_write(GROOVE_TUNING_OFFSET, data, sizeof *data);
+    if (!r) r = flash_checksum(GROOVE_TUNING_OFFSET, sizeof *data, &actual);
+    if (!r && actual != expected) r = FM1_FLASH_IO;
+    free(data);
+    if (!r) r = fm1_flash_erase(TUNING_JOURNAL_ADDRESS);
+    return r;
+}
+static int tuning_commit(const struct tuning_sector *data)
+{
+    int r = recover_staging();
+    struct tuning_journal header = {TUNING_JOURNAL_MAGIC,
+                                    ~groove_crc32(~0U, data, sizeof *data), ~0U};
+    if (!r) r = fm1_flash_erase(TUNING_JOURNAL_ADDRESS);
+    if (!r) r = fm1_flash_write(TUNING_JOURNAL_ADDRESS, &header, sizeof header);
+    if (!r) r = fm1_flash_write(TUNING_JOURNAL_ADDRESS + sizeof header, data, sizeof *data);
+    if (!r) {
+        uint32_t crc;
+        r = flash_checksum(TUNING_JOURNAL_ADDRESS + sizeof header, sizeof *data, &crc);
+        if (!r && crc != header.crc) r = FM1_FLASH_IO;
+    }
+    if (!r) {
+        uint32_t commit = 0;
+        r = fm1_flash_write(TUNING_JOURNAL_ADDRESS + offsetof(struct tuning_journal, commit),
+                            &commit, sizeof commit);
+    }
+    if (!r) {
+        uint32_t address;
+        r = tuning_location(&address);
+        if (!r && address == GROOVE_TUNING_OFFSET) r = FM1_FLASH_IO;
+    }
+    return r ? r : tuning_recover();
+}
+static uint32_t legacy_entry_crc(uint32_t generation, const struct groove_tuning *t, uint32_t project_crc)
+{
+    uint32_t crc = groove_crc32(~0U, &generation, sizeof generation);
+    crc = groove_crc32(crc, t, sizeof(struct groove_tuning) * GROOVE_TRACKS);
+    return ~groove_crc32(crc, &project_crc, sizeof project_crc);
+}
+static uint32_t entry_crc(const struct tuning_entry *e)
+{ return ~groove_crc32(~0U, e, offsetof(struct tuning_entry, crc)); }
+static uint32_t project_tuning_key(void)
+{
+    uint32_t crc = groove_crc32(~0U, &record.header.target, sizeof record.header.target);
+    return ~groove_crc32(crc, &record.project, sizeof record.project);
+}
+static uint32_t block_crc(const struct tuning_block *b)
+{ return ~groove_crc32(~0U, b, offsetof(struct tuning_block, crc)); }
+static int tuning_tables_valid(const struct groove_tuning *t)
+{
+    for (unsigned i = 0; i < GROOVE_TRACKS; ++i)
+        for (unsigned k = 0; k < GROOVE_TUNING_KEYS; ++k)
+            if (t[i].main[k] == -128 || t[i].alt[k] == -128)
+                return 0;
+    return 1;
+}
+static void tuning_zero(void)
+{
+    static const struct groove_tuning zero[GROOVE_TRACKS];
+    if (groove_tuning_apply)
+        (void)groove_tuning_apply(zero);
+}
+/* Positive if an old bank occupies the tuning sector, zero if available,
+ * negative on a transient/read error. A read failure must never masquerade as
+ * absent tuning and permit a settings write to invalidate a legacy entry. */
+static int tuning_blocked(void)
+{
+    uint32_t bank[3];
+    if (fm1_flash_size() < GROOVE_FLASH_BYTES)
+        return 1;
+    int r = fm1_flash_read(GROOVE_SAMPLE_OFFSET, bank, sizeof bank);
+    if (r)
+        return r;
+    return bank[0] == SAMPLE_BANK_MAGIC && bank[2] > GROOVE_SAMPLE_LIMIT;
+}
+static int tuning_has_values(const struct groove_tuning tables[GROOVE_TRACKS])
+{
+    for (unsigned i = 0; i < GROOVE_TRACKS; ++i)
+        for (unsigned k = 0; k < GROOVE_TUNING_KEYS; ++k)
+            if (tables[i].main[k] || tables[i].alt[k]) return 1;
+    return 0;
+}
+static int tuning_can_save(void)
+{
+    if (!groove_tuning_capture) return 0;
+    int r = tuning_blocked();
+    if (r <= 0) return r;
+    struct groove_tuning tables[GROOVE_TRACKS];
+    r = groove_tuning_capture(tables);
+    return r ? r : tuning_has_values(tables) ? GROOVE_PROJECT_TUNING_SPACE : 0;
+}
+/* Legacy generation/record CRC, followed by the stable version-2 key. */
+static int tuning_key(unsigned slot, uint32_t key[3])
+{
+    unsigned sector = slot;
+    uint32_t generation = 0;
+    int r = latest(slot, &sector, &generation);
+    if (!r)
+        r = read_project(sector);
+    if (!r) {
+        key[0] = record.header.generation;
+        key[1] = record.header.crc;
+        key[2] = project_tuning_key();
+    }
+    return r;
+}
+/* Convert valid version-1 entries while their original records still exist.
+ * Run before ANY record write, including a settings-only update. Once version
+ * 2 is stored, changing device settings never erases the tuning sector. */
+static int tuning_upgrade(void)
+{
+    uint32_t head[2];
+    if (!groove_tuning_capture)
+        return 0;
+    int r = tuning_blocked();
+    if (r)
+        return r < 0 ? r : 0;
+    uint32_t address;
+    r = tuning_location(&address);
+    if (!r) r = fm1_flash_read(address, head, sizeof head);
+    if (r || head[0] != TUNING_MAGIC || head[1] != 1)
+        return r;
+    struct tuning_sector *s = malloc(sizeof *s);
+    if (!s)
+        return GROOVE_PROJECT_MEMORY;
+    r = fm1_flash_read(address, s, sizeof *s);
+    for (unsigned slot = 0; !r && slot < GROOVE_PROJECT_SLOTS; ++slot) {
+        uint32_t key[3];
+        int found = tuning_key(slot, key);
+        if (found < 0) { r = found; break; }
+        struct tuning_entry *e = &s->entry[slot];
+        if (!found && e->key == key[0] &&
+            e->crc == legacy_entry_crc(key[0], e->t, key[1]) && tuning_tables_valid(e->t)) {
+            e->key = key[2];
+            e->crc = entry_crc(e);
+        } else {
+            memset(e, 0xff, sizeof *e);
+        }
+    }
+    if (!r) {
+        s->version = TUNING_VERSION;
+        r = tuning_commit(s);
+    }
+    free(s);
+    return r;
+}
+/* Report errors so a failed tuning write cannot mark the project clean. */
+static int tuning_save(unsigned slot)
+{
+    struct groove_tuning tables[GROOVE_TRACKS];
+    uint32_t key[3];
+    if (!groove_tuning_capture)
+        return 0;
+    int r = groove_tuning_capture(tables);
+    if (r)
+        return r;
+    r = tuning_blocked();
+    if (r)
+        return r < 0 ? r : tuning_has_values(tables) ? GROOVE_PROJECT_TUNING_SPACE : 0;
+    r = tuning_key(slot, key);
+    if (r)
+        return r;
+    struct tuning_sector *s = malloc(2U * sizeof *s);
+    if (!s)
+        return GROOVE_PROJECT_MEMORY;
+    struct tuning_sector *old = s + 1;
+    r = fm1_flash_read(GROOVE_TUNING_OFFSET, old, sizeof *old);
+    if (!r) {
+        *s = *old;
+        if (s->magic != TUNING_MAGIC || s->version != TUNING_VERSION) {
+            memset(s, 0xff, sizeof *s);
+            s->magic = TUNING_MAGIC;
+            s->version = TUNING_VERSION;
+        }
+        struct tuning_entry *e = &s->entry[slot];
+        e->key = key[2];
+        memcpy(e->t, tables, sizeof tables);
+        e->crc = entry_crc(e);
+        if (memcmp(s, old, sizeof *s)) {
+            r = tuning_commit(s);
+        }
+    }
+    free(s);
+    return r;
+}
+/* Read and validate before applying any project state. Missing/corrupt entries
+ * mean zero tuning; an I/O error aborts the load and leaves live state intact. */
+static int tuning_read(unsigned slot, const uint32_t key[3],
+                       struct groove_tuning tables[GROOVE_TRACKS])
+{
+    memset(tables, 0, sizeof(struct groove_tuning) * GROOVE_TRACKS);
+    int r = tuning_blocked();
+    if (r)
+        return r < 0 ? r : 0;
+    struct tuning_entry e;
+    uint32_t head[2];
+    uint32_t address;
+    r = tuning_location(&address);
+    if (!r) r = fm1_flash_read(address, head, sizeof head);
+    if (r)
+        return r;
+    if (head[0] != TUNING_MAGIC || (head[1] != 1 && head[1] != TUNING_VERSION))
+        return 0;
+    r = fm1_flash_read(address + offsetof(struct tuning_sector, entry) +
+                       slot * sizeof e, &e, sizeof e);
+    if (r)
+        return r;
+    if ((head[1] == 1 ? e.key == key[0] && e.crc == legacy_entry_crc(key[0], e.t, key[1])
+                       : e.key == key[2] && e.crc == entry_crc(&e)) && tuning_tables_valid(e.t))
+        memcpy(tables, e.t, sizeof e.t);
+    return 0;
+}
 /* record holds a validated payload. Commit follows the complete header/body. */
 static int program_record(unsigned sector)
 {
@@ -148,7 +429,9 @@ static int recover_staging(void)
 {
     if (fm1_flash_size() < USER_BYTES)
         return FM1_FLASH_UNAVAILABLE;
-    int r = read_sector(STAGING_SECTOR);
+    int r = tuning_recover();
+    if (r) return r;
+    r = read_sector(STAGING_SECTOR);
     if (r)
         return r == GROOVE_PROJECT_EMPTY ? 0 : r;
     const struct header staged = record.header;
@@ -238,7 +521,11 @@ int groove_project_save_slot(unsigned slot)
 {
     if (slot >= GROOVE_PROJECT_SLOTS)
         return GROOVE_PROJECT_INVALID;
-    int r = recover_staging();
+    int r = tuning_can_save();
+    if (!r)
+        r = tuning_upgrade();
+    if (!r)
+        r = recover_staging();
     if (r)
         return r;
     unsigned sector = slot;
@@ -258,6 +545,11 @@ int groove_project_save_slot(unsigned slot)
         r = write_record(slot, generation, saved);
     if (!r) {
         ++project_revision;
+        r = tuning_save(slot);
+        if (r) {
+            groove_project_touch();
+            return r;
+        }
         if (settings.slot != slot) {
             settings.slot = (uint8_t)slot;
             settings_mark();
@@ -276,9 +568,16 @@ int groove_project_load_slot(unsigned slot)
     int r = latest(sector, &sector, &generation);
     if (!r)
         r = read_project(sector);
+    uint32_t key[3] = {record.header.generation, record.header.crc, 0};
+    struct groove_tuning tables[GROOVE_TRACKS];
+    if (!r && groove_tuning_apply) {
+        key[2] = project_tuning_key();
+        r = tuning_read(slot, key, tables);
+    }
     if (!r) {
-        groove_edit_checkpoint(0x82000U + slot);
-        r = groove_project_apply(&record.project);
+        r = apply_edit(&record.project, 0x82000U + slot);
+        if (!r && groove_tuning_apply)
+            (void)groove_tuning_apply(tables);
     }
     if (!r && settings.slot != slot) {
         settings.slot = (uint8_t)slot;
@@ -292,6 +591,18 @@ int groove_project_load_slot(unsigned slot)
 
 int groove_project_import(const uint8_t *bytes, unsigned length)
 {
+    /* Optional trailing tuning block; without it the tables become zero. */
+    unsigned tuned = length == GROOVE_PROJECT_TUNED_BYTES;
+    struct tuning_block block;
+    if (tuned) {
+        if (!bytes)
+            return GROOVE_PROJECT_INVALID;
+        memcpy(&block, bytes + GROOVE_PROJECT_BYTES, sizeof block);
+        if (block.magic != TUNING_MAGIC || block.crc != block_crc(&block) ||
+            !tuning_tables_valid(block.t))
+            return GROOVE_PROJECT_INVALID;
+        length = GROOVE_PROJECT_BYTES;
+    }
     if (!bytes || (length != sizeof record.project && length != GROOVE_PROJECT_LEGACY_BYTES))
         return GROOVE_PROJECT_INVALID;
     memmove(&record.project, bytes, length);
@@ -302,28 +613,41 @@ int groove_project_import(const uint8_t *bytes, unsigned length)
     }
     if (!groove_project_valid(&record.project))
         return GROOVE_PROJECT_INVALID;
-    groove_edit_checkpoint(0x83000U);
-    int r = groove_project_apply(&record.project);
-    if (!r)
+    int r = apply_edit(&record.project, 0x83000U);
+    if (!r) {
+        if (tuned && groove_tuning_apply)
+            (void)groove_tuning_apply(block.t);
+        else
+            tuning_zero();
         groove_project_touch();
+    }
     return r;
 }
+/* Appends the tuning block when capacity holds it; zero tables without the hook. */
 int groove_project_export(uint8_t *bytes, unsigned capacity)
 {
     if (!bytes || capacity < sizeof record.project)
         return GROOVE_PROJECT_INVALID;
     int r = groove_project_capture(&record.project);
-    if (!r)
-        memcpy(bytes, &record.project, sizeof record.project);
-    return r;
+    if (r)
+        return r;
+    memcpy(bytes, &record.project, sizeof record.project);
+    struct tuning_block block;
+    if (capacity >= GROOVE_PROJECT_TUNED_BYTES) {
+        if (!groove_tuning_capture || groove_tuning_capture(block.t))
+            memset(block.t, 0, sizeof block.t);
+        block.magic = TUNING_MAGIC;
+        block.crc = block_crc(&block);
+        memcpy(bytes + sizeof record.project, &block, sizeof block);
+    }
+    return 0;
 }
 int groove_factory_load(unsigned index)
 {
     int r = groove_factory_build(index, &record.project);
     if (r) return r;
-    groove_edit_checkpoint(0x84000U + index);
-    r = groove_project_apply(&record.project);
-    if (!r) groove_project_touch();
+    r = apply_edit(&record.project, 0x84000U + index);
+    if (!r) { tuning_zero(); groove_project_touch(); }
     return r;
 }
 /* BLE MIDI follows the radio master switch. Ignore the old separate MIDI-off
@@ -393,7 +717,9 @@ void groove_project_poll(void)
     if (settings_dirty && fm1_millis() - settings_changed >= 1500U) {
         unsigned sector = SETTINGS_SECTOR;
         uint32_t generation = 0;
-        int r = recover_staging();
+        int r = tuning_upgrade();
+        if (!r)
+            r = recover_staging();
         if (!r)
             r = latest(SETTINGS_SECTOR, &sector, &generation);
         if (r >= 0) {

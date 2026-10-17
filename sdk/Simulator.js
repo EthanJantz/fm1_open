@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-3.0-only WITH GPL-3.0-linking-exception */
+/* Modified 2026-10-17: reserve the final flash sector during sample imports. */
 (() => {
   'use strict';
   // One portable C instance owns the panel, project and sound state. Before
@@ -37,15 +38,15 @@
             result=c.sim_midi(message.data.length); break;
           case 'export':
             result=message.timbre?c.sim_timbre_export():message.patch?c.sim_patch_export():c.sim_export();
-            if (!result) data=new Uint8Array(c.memory.buffer,c.sim_file(),message.timbre?223:message.patch?156:4064).slice();
+            if (!result) data=new Uint8Array(c.memory.buffer,c.sim_file(),message.timbre?223:message.patch?156:4264).slice();
             break;
           case 'snapshot':
             result=c.sim_export();
-            if(!result)data={bytes:new Uint8Array(c.memory.buffer,c.sim_file(),4064).slice(),revision:this.projectRevision()};
+            if(!result)data={bytes:new Uint8Array(c.memory.buffer,c.sim_file(),4264).slice(),revision:this.projectRevision()};
             break;
           case 'factory':
             result=c.sim_factory_project(message.index);
-            if(!result)data=new Uint8Array(c.memory.buffer,c.sim_file(),4064).slice();
+            if(!result)data=new Uint8Array(c.memory.buffer,c.sim_file(),4264).slice();
             break;
           case 'factories':
             data=[];
@@ -57,14 +58,16 @@
             }
             break;
           case 'import':
-            if (!message.data || (message.timbre?message.data.length!==223:message.patch?message.data.length!==156:![4048,4064].includes(message.data.length))) throw Error('文件长度无效');
+            if (!message.data || (message.timbre?message.data.length!==223:message.patch?message.data.length!==156:![4048,4064,4264].includes(message.data.length))) throw Error('文件长度无效');
             new Uint8Array(c.memory.buffer,c.sim_file(),message.data.length).set(message.data);
             result=message.timbre?c.sim_timbre_import():message.patch?c.sim_patch_import():c.sim_import(message.data.length); break;
           case 'clear': c.sim_clear(); break;
           case 'samples': {
-            if (!(message.data instanceof Uint8Array) || message.data.length<512 || message.data.length>466944) throw Error('采样库长度无效');
+            if (!(message.data instanceof Uint8Array) || message.data.length<512 || message.data.length>462848) throw Error('采样库长度无效');
             const flash=new Uint8Array(c.memory.buffer,c.sim_flash()+69632,466944),previous=flash.slice();
-            flash.fill(255);flash.set(message.data);
+            // Keep the final 4096 bytes (per-project tuning). The full backup
+            // still permits rollback of a pre-cap bank on validation failure.
+            flash.fill(255,0,462848);flash.set(message.data);
             result=c.sim_sample_bank(message.data.length);
             if(result){
               new Uint8Array(c.memory.buffer,c.sim_flash()+69632,466944).set(previous);
@@ -219,7 +222,7 @@
     clearTimeout(syncTimer);syncTimer=undefined;renderSync();
   }
   function rememberDeviceSnapshot(bytes,kind){
-    deviceSnapshot=FM1Web.upgradeProject(bytes).slice();deviceSnapshotKind=kind;
+    deviceSnapshot=FM1Web.tunedProject(bytes).slice();deviceSnapshotKind=kind;
     comparedRevision=undefined;comparisonMatches=false;++syncGeneration;renderSync();
   }
   async function compareDeviceSnapshot(){
@@ -699,8 +702,13 @@
   $('sim-start').onclick=()=>{muted=!muted;return start(!muted);};$('sim-panic').onclick=()=>{release();send('panic');};
   $('sim-play-control').onclick=()=>action(async()=>{
     if(starting)return;
-    if(!state?.[14]&&!muted&&!audioOn){await start(true);if(!audioOn)return;}
     release();
+    if(!state?.[14]&&!muted&&!audioOn){
+      const play={page:state?.[1],track:state?.[0]};wakingPlay=play;
+      await start(true);
+      if(wakingPlay!==play)return;wakingPlay=undefined;
+      if(!audioOn||state?.[1]!==play.page||state?.[0]!==play.track)return;
+    }
     // PLAY on the preset browser loads its selection. The toolbar controls
     // transport only; other editors keep their page and cursor while playing.
     if(state?.[1]===16)send('open',{page:0});
@@ -744,7 +752,7 @@
   $('sim-file').onchange=async()=>{
     const revision=++fileRevision;selectedFile=undefined;voices=[];$('sim-voice').replaceChildren();$('sim-voice').hidden=true;availability();const file=$('sim-file').files[0];if(!file)return;
     try {
-    if(file.size>4104)throw Error('请选择 .fm1 项目、.fm1t 音色或 DX7 .syx 文件');const bytes=new Uint8Array(await file.arrayBuffer());
+    if(file.size>4280)throw Error('请选择 .fm1 项目、.fm1t 音色或 DX7 .syx 文件');const bytes=new Uint8Array(await file.arrayBuffer());
     if(revision!==fileRevision)return;
     if(bytes[0]===240){voices=FM1Web.readVoices(bytes);voices.forEach((voice,i)=>{const option=document.createElement('option');option.value=i;option.textContent=(i+1)+' · '+String.fromCharCode(...voice.slice(145,155)).replace(/[^\x20-\x7e]/g,'?');$('sim-voice').append(option);});selectedFile={patch:true};}
     else if(bytes[3]===84) selectedFile={timbre:true,data:FM1Web.readTimbreFile(bytes)};
